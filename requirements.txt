@@ -1,0 +1,6 @@
+# Tested with Python 3.11, CUDA 12.4, 1x RTX 3090 (24 GB)
+torch>=2.4
+torchvision>=0.19
+transformers>=4.44
+opencv-python-headless>=4.8
+numpy>=1.26
