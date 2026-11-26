@@ -34,7 +34,8 @@ pip install -r requirements.txt
 python scripts/check_data.py --data-root sample_data
 python train.py --data-root sample_data --cls sunspot --arch unet --epochs 2 --bs 2
 
-# 3) 전체 데이터를 data/ 에 배치한 뒤 학습 (아래 2절의 디렉터리 구조 참고)
+# 3) 전체 데이터를 내려받아 data/ 에 배치한 뒤 학습 (받는 방법은 2.4절)
+python scripts/prepare_data.py --src downloads --out data
 python scripts/check_data.py --data-root data
 python train.py --cls coronal_hole --arch unet
 ```
@@ -66,7 +67,7 @@ python train.py --cls coronal_hole --arch unet
 | `<stem>.png` | 512 × 512, 8-bit 단일 채널 | **세그멘테이션 마스크**. 255 = 특징, 0 = 배경 | **학습 타깃** |
 
 - 마스크는 **프레임 단위**입니다. 한 프레임에 있는 해당 클래스의 모든 객체를 하나의 이진 마스크로 합친 것입니다.
-- 이 저장소는 **모든 프레임의 세그멘테이션 레이블이 완성되어 있다고 가정**합니다. 마스크 파일이 없는 프레임은 "특징 없음"(빈 마스크)으로 취급합니다. 현재 데이터에서 마스크가 없는 프레임은 클래스당 0~64장입니다.
+- 이 저장소는 **모든 프레임의 세그멘테이션 레이블이 완성되어 있다고 가정**합니다. 마스크 파일이 없는 프레임은 "특징 없음"(빈 마스크)으로 취급합니다. 내려받은 전체 데이터(2.4절)에는 모든 프레임에 마스크 파일이 있습니다.
 - 클래스별 레이블 정의는 다음과 같습니다.
   - **코로나홀**: AIA 193 Å 디스크 위에서 주변보다 뚜렷하게 어두운 영역. 디스크 밖은 포함하지 않습니다.
   - **흑점**: HMI 연속광에서 어두운 암부와 반암부. 작은 흑점은 수 픽셀 크기입니다.
@@ -93,7 +94,7 @@ data/
 - 파일명 규칙: `YYYYMMDD_HHMMSS_SDO_<CHANNEL>_512`. 마스크는 같은 `<stem>`에 `.png` 확장자를 씁니다.
 - train/test 분할은 원본 데이터셋의 분할을 그대로 따릅니다(약 8 : 2).
 - `sample_data/`에 같은 구조로 클래스별 train 2 · test 2 프레임이 들어 있어 설치 확인에 쓸 수 있습니다.
-- 전체 데이터는 용량(영상 약 570MB) 때문에 저장소에 포함하지 않았습니다. 위 구조로 `data/`에 두거나 `--data-root`로 위치를 지정하세요.
+- 전체 데이터는 용량(약 550MB) 때문에 저장소에 포함하지 않았습니다. 아래 2.4절의 안내대로 내려받아 `data/`에 두거나 `--data-root`로 위치를 지정하세요.
 
 데이터 구성을 점검하려면 다음을 실행합니다. 프레임·마스크·박스 개수와 전경 비율을 클래스별로 출력하고, 크기가 512 × 512가 아닌 마스크를 찾아냅니다.
 
@@ -101,7 +102,37 @@ data/
 python scripts/check_data.py --data-root data
 ```
 
-### 2.4 입력 전처리와 증강
+### 2.4 전체 데이터 받기
+
+전체 데이터(이미지 12,394장과 세그멘테이션 레이블)는 Google Drive 폴더에서 받을 수 있습니다.
+
+**[데이터 내려받기 (Google Drive)](https://drive.google.com/drive/folders/17VtZ_umi_MuGNKuam5OpBLoPDZFm848v?usp=drive_link)**
+
+| 파일 | 클래스 | 이미지 | 박스 | 크기 |
+|---|---|---|---|---|
+| `solar_coronal_hole_seg.zip` | 코로나홀 (AIA 193 Å) | 5,085 | 9,984 | 155 MB |
+| `solar_sunspot_seg.zip` | 흑점 (HMI 연속광) | 4,383 | 11,244 | 262 MB |
+| `solar_prominence_seg.zip` | 홍염 (AIA 304 Å) | 2,926 | 9,241 | 133 MB |
+| `DATASET.md` | 데이터셋 설명서 | | | |
+
+1. 위 폴더에서 필요한 클래스의 zip을 한 폴더(예: `downloads/`)에 내려받습니다. 클래스마다 따로 묶여 있어 하나만 받아도 됩니다.
+2. 아래 스크립트로 이 저장소가 읽는 `data/` 구조(2.3절)로 풉니다. zip을 직접 풀 필요는 없습니다.
+
+   ```bash
+   python scripts/prepare_data.py --src downloads --out data
+   ```
+
+3. 구성을 점검합니다.
+
+   ```bash
+   python scripts/check_data.py --data-root data
+   ```
+
+- zip 안에는 이미지별 마스크(`masks_full/`) 외에 박스별 마스크(`masks/`)와, 박스마다 레이블 출처(사람 / SAM 3 / 재생성 / 밝기 규칙)를 적은 `labels.csv`가 들어 있습니다. `prepare_data.py`는 학습에 쓰는 이미지별 마스크만 꺼냅니다.
+- 레이블을 만든 방법, 출처별 개수, 쓸 때 알아 둘 점은 [docs/DATASET.md](docs/DATASET.md)에 있습니다.
+- 잘못된 레이블에 대한 정정 요청은 언제든 환영합니다. `labels.csv`의 `split`, `stem`, `box_index`와 함께 이슈로 알려 주세요.
+
+### 2.5 입력 전처리와 증강
 
 - 입력: 그레이스케일 `x / 255 − 0.5` (값 범위 −0.5 ~ 0.5)
 - U-Net은 1채널, DeepLabV3·SegFormer는 같은 영상을 3채널로 복제해 입력합니다.
@@ -301,6 +332,7 @@ python predict.py --ckpt runs/coronal_hole/segformer/best.pt --input frame.jpg -
 │   ├── check_data.py      데이터 구성 점검과 통계
 │   ├── train_all.sh       9개 베이스라인 일괄 학습
 │   └── summarize.py       결과 표 생성
+├── scripts/prepare_data.py  내려받은 zip을 data/ 구조로 풀기
 ├── sample_data/           설치 확인용 소량 데이터 (클래스별 train 2 · test 2)
 ├── docs/figures/          README 그림
 └── requirements.txt
