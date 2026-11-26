@@ -16,7 +16,7 @@ B = Path(__file__).resolve().parent; sys.path.insert(0, str(B))
 import label_other_classes as L
 from build_release import human, CLS
 DATA = B.parent / "dataset"; F = 512
-CK = dict(sunspot="gold_sunspot/runs/sam3_sunspot_deploy.pt", prominence="synth_prom/final_model/sam3_prom_human133_kasi15_hs100_strands_hazearcs_cp_microarcs.pt")
+CK = dict(sunspot="gold_sunspot/runs/sam3_sunspot_deploy.pt", prominence="synth_prom/final_model/sam3_prom_human133_r215_hs100_strands_hazearcs_cp_microarcs.pt")
 PADS = dict(sunspot=[0.8, 0.3, 1.5], prominence=[0.5, 0.2, 1.0]); THR = [0.0, -1.0, -2.0]
 SEEDS = dict(sunspot=[("cv", 0), ("ext", 0)], prominence=[("cv", -3), ("ext", -3), ("ext", -10), ("ext", -20)])
 

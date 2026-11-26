@@ -24,7 +24,7 @@ def human(cls):
         for l in open(B / "gold/gold.jsonl"):
             x = json.loads(l); H[(x["stem"], x["bi"])] = (B / "gold/masks_512" / f"{x['sid']}.png", int(x["source"] == "edited"))
     else:
-        for g in dict(sunspot=["gold_sunspot"], prominence=["gold_prominence", "gold_prominence_kasi", "gold_prominence_hs"])[cls]:
+        for g in dict(sunspot=["gold_sunspot"], prominence=["gold_prominence", "gold_prominence_r2", "gold_prominence_hs"])[cls]:
             for r in csv.DictReader(open(B / g / "labels.csv")):
                 H[(r["stem"], int(r["bi"]))] = (B / g / r["mask_path"], int(r["edited"]))
     return H

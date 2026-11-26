@@ -19,7 +19,8 @@
 6. [사용법](#6-사용법)
 7. [참고 성능](#7-참고-성능)
 8. [코드 구조](#8-코드-구조)
-9. [주의사항](#9-주의사항)
+9. [SAM 3로 레이블을 만든 과정](#9-sam-3로-레이블을-만든-과정)
+10. [주의사항](#10-주의사항)
 
 ---
 
@@ -331,8 +332,9 @@ python predict.py --ckpt runs/coronal_hole/segformer/best.pt --input frame.jpg -
 ├── scripts/
 │   ├── check_data.py      데이터 구성 점검과 통계
 │   ├── train_all.sh       9개 베이스라인 일괄 학습
-│   └── summarize.py       결과 표 생성
-├── scripts/prepare_data.py  내려받은 zip을 data/ 구조로 풀기
+│   ├── summarize.py       결과 표 생성
+│   ├── prepare_data.py    내려받은 zip을 data/ 구조로 풀기
+│   └── labeling/          SAM 3 레이블링 도구 (9절)
 ├── sample_data/           설치 확인용 소량 데이터 (클래스별 train 2 · test 2)
 ├── docs/figures/          README 그림
 └── requirements.txt
@@ -342,7 +344,121 @@ python predict.py --ckpt runs/coronal_hole/segformer/best.pt --input frame.jpg -
 
 ---
 
-## 9. 주의사항
+## 9. SAM 3로 레이블을 만든 과정
+
+원본 데이터에는 박스만 있고 픽셀 마스크가 없었습니다. 세그멘테이션 레이블은 [SAM 3](https://huggingface.co/facebook/sam3)에 박스를 프롬프트로 넣어 만들었고, 사람이 고친 소수의 레이블로 SAM 3를 파인튜닝해 품질을 올렸습니다. 이 과정에 쓴 도구는 `scripts/labeling/`에 있습니다.
+
+### 9.1 전체 흐름
+
+```
+박스(VOC XML) ─▶ ① SAM 3 초안 마스크 ─▶ ② 사람이 웹 편집기에서 수정·승인 ─▶ ③ SAM 3 파인튜닝
+                                                                               │
+   ⑦ 데이터셋 묶기·전수 검사 ◀─ ⑥ 탈락 박스 재생성 ◀─ ⑤ 자동 품질 검사 ◀─ ④ 전체 박스 재레이블
+```
+
+| 단계 | 하는 일 | 도구 |
+|---|---|---|
+| ① 초안 | 박스마다 SAM 3로 마스크를 만든다 | `label_other_classes.py`, `build_label_pack.py` |
+| ② 사람 수정 | test 분할에서 뽑은 박스의 초안을 브러시로 고치거나 승인한다 | `gen_class_eval_assets.py`, `eval_app.py` |
+| ③ 파인튜닝 | 사람 레이블을 512 좌표로 내보내 SAM 3의 헤드만 학습한다 | `export_gold.py`, `export_class_edits.py`, `train_sam3_*.py`, `synth_prom/` |
+| ④ 재레이블 | 파인튜닝한 모델로 train+test의 모든 박스를 다시 레이블한다 | `label_other_classes.py --ckpt`, `build_label_pack.py --ckpt` |
+| ⑤ 품질 검사 | 면적·박스 점유율·밝기·신뢰도 기준을 통과한 마스크만 확정한다 | ④의 도구에 포함 |
+| ⑥ 재생성 | 탈락한 박스를 같은 모델에 조건을 바꿔 다시 만든다 | `retry_*.py` |
+| ⑦ 묶기·검사 | 사람 레이블을 우선해 합치고, 박스마다 파일과 픽셀 수를 확인한다 | `build_release.py`, `verify_release.py` |
+
+②와 ③은 한 번으로 끝나지 않았습니다. 홍염은 파인튜닝한 모델의 마스크를 다시 사람이 고치고 그 레이블로 재학습하는 과정을 여러 번 돌았습니다.
+
+### 9.2 클래스별 SAM 3 사용 방식
+
+세 클래스 모두 454M 크기의 영상 인코더는 고정하고 프롬프트 인코더와 마스크 디코더만 학습했습니다. 사람 레이블이 수십~백여 건이라 인코더를 움직일 수 없기 때문입니다.
+
+| | 코로나홀 | 흑점 | 홍염 |
+|---|---|---|---|
+| SAM 3 모델 | 박스 프롬프트 모델 (`Sam3Model`) | 점 프롬프트 모델 (`Sam3TrackerModel`) | 점 프롬프트 모델 (`Sam3TrackerModel`) |
+| 프롬프트 | 박스 | 박스 안에서 가장 어두운 픽셀 | 림브 밖에서 가장 밝은 픽셀 |
+| 입력 | 512 프레임 전체, 원반 밖은 흰색 처리 | 박스 주변을 잘라 확대 | 박스 주변을 잘라 확대 |
+| 후보 선택 | 모델 신뢰도 | 밝기 기준 영역과 가장 잘 맞는 후보 | 밝기 기준 영역과 가장 잘 맞는 후보 |
+| 학습 레이블 | 사람 72건 | 사람 45건 | 사람 133건 + 합성 7,599건 |
+| 품질 검사 | 면적 ≥ 60px, 점유율 0.05–0.90, 신뢰도 ≥ 0.30 | 면적 ≥ 4px, 점유율 ≤ 0.90, 주변보다 어두움 | 면적 ≥ 8px, 점유율 ≤ 0.90, 주변보다 밝음 |
+| 사람 레이블 대비 IoU (전 → 후) | 0.687 → 0.793 | 0.633 → 0.715 | 0.26 → 약 0.64 |
+
+- **흑점·홍염을 잘라 확대하는 이유**: 흑점은 512 프레임에서 10–40px 크기인데 SAM 3는 마스크를 288×288로 만듭니다. 프레임 전체를 넣으면 박스를 통째로 채우는 마스크가 나옵니다.
+- **밝기 기준 영역**: 흑점은 주변 광구보다 어두운 픽셀, 홍염은 림브 밖에서 하늘보다 밝은 픽셀을 단순 임계값으로 잡은 것입니다. 점 프롬프트의 위치를 정하고, SAM 3가 내놓는 여러 후보 중 하나를 고르는 데 씁니다.
+- **흑점 손실 함수**: 사람이 고친 41건 중 35건이 마스크를 넓힌 것이어서, 미검출을 더 크게 벌하는 Tversky 손실(α 0.3, β 0.7)을 썼습니다.
+- 코로나홀·흑점의 IoU는 날짜를 분리한 5-fold 교차검증 값입니다.
+
+### 9.3 홍염 합성 데이터
+
+홍염은 모양이 다양한 데 비해 사람 레이블이 적어, 실제 프레임의 림브에 홍염을 그려 넣은 합성 데이터를 함께 학습했습니다. 합성 영상은 호스트 프레임 자신의 밝기→색 대응을 따라 칠하므로 색이 프레임과 어울립니다.
+
+| 도구 (`synth_prom/`) | 만드는 것 |
+|---|---|
+| `synth.py` | 사람 레이블의 모양을 뼈대로 뽑아 늘이고 휘어 다시 칠하는 브러시. 다른 생성기의 공통 기반 |
+| `geo_shapes.py` | 직선·호·베지어 곡선·나선 등 도형으로 그린 모양 |
+| `composite.py` | 2–4개 모양을 투명도·블러를 달리해 한 자리에 겹친 층 구조 |
+| `strands.py` | 여러 가닥이 부채꼴·꼬임·나무 모양으로 얽힌 구조. 가닥 사이 틈은 레이블에서 뺀다 |
+| `haze_arcs.py`, `fine_arcs.py` | 뿌연 빛무리 앞에 놓인 가는 고리들. 빛무리는 레이블에 넣지 않는다 |
+| `copypaste.py` | 실제 홍염 픽셀과 사람 마스크를 떼어 변형한 뒤 다른 프레임 림브에 붙인다 |
+| `micro_arcs.py` | 넓이 약 300px의 아주 작은 겹친 고리 |
+| `train_final_hs.py` | 사람 레이블(좌우 반전 포함, 5회 반복)과 합성 데이터로 최종 모델 학습 |
+
+합성 데이터의 호스트 프레임은 모두 train 분할이고 사람 레이블은 모두 test 분할이라 서로 겹치지 않습니다.
+
+### 9.4 사람 수정용 웹 편집기
+
+`eval_app.py`는 Flask로 만든 편집기입니다. 박스 주변을 확대한 화면에 모델 마스크를 겹쳐 보여 주고, 평가자가 브러시로 더하거나 지운 뒤 판정과 함께 저장합니다. 판정은 SQLite에, 고친 마스크는 평가자별 PNG로 남습니다.
+
+```bash
+cd scripts/labeling
+python gen_class_eval_assets.py --cls prominence --n 100 --split test   # 편집할 샘플과 초안 마스크 준비
+EVAL_WEB=eval_web_prominence python eval_app.py --port 2228             # 편집기 실행
+python export_class_edits.py --cls prominence --any                     # 고친 마스크를 512 좌표 레이블로 내보내기
+```
+
+### 9.5 실행 순서 예 (흑점)
+
+```bash
+cd scripts/labeling
+python label_other_classes.py --cls sunspot                              # ① 바닐라 SAM 3 초안
+python gen_class_eval_assets.py --cls sunspot --split test               # ② 편집 샘플 준비 → eval_app.py 로 수정
+python export_class_edits.py --cls sunspot --any                         # ③ 사람 레이블 내보내기
+python train_sam3_sunspot.py --all-folds                                 #    날짜 분리 5-fold 교차검증
+python train_sam3_sunspot.py --final                                     #    전체 레이블로 최종 학습
+python label_other_classes.py --cls sunspot --ckpt <체크포인트> --out label_pack_sunspot_ft --save-all   # ④⑤
+python retry_unlabeled.py --cls sunspot && python retry_unlabeled_wide.py      # ⑥ 탈락 박스 재생성
+python retry_select.py sunspot && python retry_fallback.py sunspot
+python build_release.py && python build_release.py --zip                 # ⑦ 데이터셋 묶기
+python verify_release.py --zip                                           #    규칙 기반 전수 검사
+```
+
+### 9.6 도구 목록
+
+| 파일 (`scripts/labeling/`) | 역할 |
+|---|---|
+| `label_other_classes.py` | 흑점·홍염 레이블 생성의 본체. 프롬프트 배치, 후보 선택, 품질 검사, 레이블 팩 저장 |
+| `build_label_pack.py`, `sam3_common.py` | 코로나홀 레이블 생성과 품질 검사 |
+| `segmenters.py`, `solar_disk_cv.py` | 태양 원반·림브 찾기, 밝기 기준 영역 |
+| `train_sam3_gold.py` | 코로나홀 파인튜닝 |
+| `train_sam3_sunspot.py` | 흑점 파인튜닝 |
+| `train_sam3_prominence.py` | 홍염 파인튜닝(사람 레이블만). 최종 학습의 공통 함수 |
+| `synth_prom/` | 홍염 합성 데이터 생성기와 최종 학습 (9.3절) |
+| `gen_class_eval_assets.py`, `eval_app.py` | 사람 수정용 웹 편집기 (9.4절) |
+| `export_gold.py`, `export_class_edits.py` | 편집기에서 고친 마스크를 학습용 레이블로 내보내기 |
+| `retry_unlabeled.py`, `retry_unlabeled_wide.py`, `retry_unlabeled_ch.py` | 탈락 박스를 조건을 바꿔 재생성 |
+| `retry_select.py`, `retry_ch_vote.py`, `retry_fallback.py` | 재생성 조합 평가와 박스별 선택, 마지막 채우기 |
+| `build_release.py`, `verify_release.py` | 데이터셋 묶기와 규칙 기반 전수 검사 |
+
+알아 둘 점:
+
+- **그대로는 실행되지 않습니다.** SAM 3 가중치(`sam3_model/`), 원본 데이터(`../dataset/`), 사람 레이블, 파인튜닝 체크포인트는 저장소에 없습니다. SAM 3는 Hugging Face에서 받아 `scripts/labeling/sam3_model/`에 두어야 하고, 사람 레이블은 편집기로 직접 만들어야 합니다.
+- 추가 패키지가 필요합니다: `transformers`(SAM 3 지원 버전), `flask`, `scipy`, `scikit-image`.
+- 코드 안의 `labeller_N`은 평가자 ID를 익명으로 바꾼 것입니다. 직접 쓸 때는 편집기에 입력한 평가자 ID로 바꾸세요.
+- 코로나홀의 맨 처음 초안을 만든 도구는 포함하지 않았습니다. 의존 모듈 일부가 남아 있지 않아 실행할 수 없기 때문입니다.
+- 흑점 재생성에서 드러난 문제(태양 원반이 실제보다 작게 잡힘)와 재생성 결과는 [docs/unlabeled_retry_report_20261126.md](docs/unlabeled_retry_report_20261126.md)에 있습니다.
+
+---
+
+## 10. 주의사항
 
 - **검증 = test 분할**: 별도 검증 분할 없이 test 분할로 best epoch를 고릅니다. 따라서 보고되는 test 성능은 약간 낙관적일 수 있습니다. 엄밀한 비교가 필요하면 train에서 날짜 기준으로 검증 분할을 떼어 내세요(같은 날 프레임이 양쪽에 섞이지 않도록).
 - **날짜 상관**: 같은 날 여러 시각의 프레임이 있어 서로 매우 비슷합니다. 무작위 분할보다 날짜 단위 분할이 일반화 성능을 더 정직하게 보여 줍니다.
